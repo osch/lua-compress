@@ -1,0 +1,271 @@
+name: test
+
+on: [push, workflow_dispatch]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        luaVersion: ["5.1", "5.2", "5.3", "5.4", "5.5", "luajit"]
+        exclude:
+          # LuaJIT on Windows can't find the Lua library when building C
+          # modules with gh-actions-lua, so skip it there.
+          - os: windows-latest
+            luaVersion: luajit
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: ./.github/actions/msvc-dev-env
+      if: runner.os == 'Windows'
+
+    - name: remove conflicting Git link.exe (Windows)
+      # Git for Windows ships a coreutils "link" (hardlink tool) in usr/bin
+      # that shadows MSVC's link.exe under the bash shell used below.
+      if: runner.os == 'Windows'
+      shell: bash
+      run: rm -f "/usr/bin/link.exe"
+
+    - name: install libraries (Linux)
+      if: runner.os == 'Linux'
+      # liblzma-dev, xz-utils and Perl's Compress::Raw::Lzma / IO::Compress::Xz from the
+      # same distribution: one liblzma version, so that test04 of compress.lzma can
+      # compare the bytes; p7zip-full for its 7z archives
+      # libbz2-dev, bzip2 and Perl's Compress::Raw::Bzip2 / IO::Compress::Bzip2 (libbz2
+      # 1.0.8 in all of them) for test04 of compress.bzip2
+      # (refresh the package lists first: the runner image's lists go stale, and
+      #  a superseded package version is no longer on the mirror -> 404)
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y libbrotli-dev brotli zlib1g-dev qpdf liblzma-dev xz-utils p7zip-full libcompress-raw-lzma-perl libio-compress-lzma-perl libbz2-dev bzip2 libcompress-raw-bzip2-perl libio-compress-perl
+
+    - name: install libraries (macOS)
+      if: runner.os == 'macOS'
+      # zlib ships with macOS
+      # zlib also from Homebrew (macOS's own is older): the same zlib version as
+      # the one in the runner's Perl, so that test04 can compare the bytes
+      # xz from Homebrew: its liblzma and its xz tool, the same version for test04
+      # bzip2 from Homebrew (keg-only): libbz2 1.0.8, as macOS's bzip2 tool and the
+      # libbz2 that the runner's Compress::Raw::Bzip2 bundles
+      run: |
+        brew install brotli zlib xz bzip2
+        echo "BROTLI_DIR=$(brew --prefix brotli)" >> $GITHUB_ENV
+        echo "ZLIB_DIR=$(brew --prefix zlib)" >> $GITHUB_ENV
+        echo "LZMA_DIR=$(brew --prefix xz)" >> $GITHUB_ENV
+        echo "BZIP2_DIR=$(brew --prefix bzip2)" >> $GITHUB_ENV
+
+    - name: install libraries (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        vcpkg install brotli:x64-windows zlib:x64-windows liblzma:x64-windows bzip2:x64-windows
+        echo "BROTLI_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
+        echo "ZLIB_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
+        echo "LZMA_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
+        echo "BZIP2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
+        echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $GITHUB_PATH
+        # the rockspec links zlib.lib (the usual name of zlib's import library with
+        # MSVC); zlib's own CMake build, which vcpkg uses, may name it z.lib
+        lib="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib"
+        if [ ! -f "$lib/zlib.lib" ] && [ -f "$lib/z.lib" ]; then
+            cp "$lib/z.lib" "$lib/zlib.lib"
+        fi
+        # the rockspec of compress.lzma links lzma.lib, the import library of XZ Utils
+        # 5.6.3 and later (liblzma.dll); older versions name it liblzma.lib
+        if [ ! -f "$lib/lzma.lib" ] && [ -f "$lib/liblzma.lib" ]; then
+            cp "$lib/liblzma.lib" "$lib/lzma.lib"
+        fi
+        ls "$lib"
+
+    - name: Perl with the zlib version of vcpkg (Windows)
+      # Strawberry's Compress::Raw::Zlib may bundle another zlib version than
+      # vcpkg's: reinstall the current one from CPAN, which bundles (and links
+      # statically) the current zlib release, as vcpkg ships it. test04 fails
+      # if the versions still differ (COMPRESS_TEST_REQUIRE_IDENTICAL below).
+      # Strawberry's gcc, under cmd so that its own toolchain comes first.
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: |
+        set PATH=C:\Strawberry\c\bin;C:\Strawberry\perl\site\bin;C:\Strawberry\perl\bin;%PATH%
+        C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest --reinstall Compress::Raw::Zlib || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+        C:\Strawberry\perl\bin\perl.exe -MCompress::Raw::Zlib -e "print Compress::Raw::Zlib::zlib_version(), qq(\n)"
+
+    - uses: luarocks/gh-actions-lua@v14
+      with:
+        luaVersion: ${{ matrix.luaVersion }}
+
+    - uses: luarocks/gh-actions-luarocks@v7
+
+    - name: setup 
+      shell: bash
+      run: |
+        luarocks install carray
+        luarocks make tests/compress_multistate-scm-0.rockspec
+        luarocks make tests/compress_testcarray-scm-0.rockspec
+        # each module rock on its own, then the meta rock that depends on all of them
+        if [ -n "$BROTLI_DIR" ]; then
+            luarocks make rockspecs/compress.brotli-scm-0.rockspec BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+        else
+            luarocks make rockspecs/compress.brotli-scm-0.rockspec
+        fi
+        if [ -n "$ZLIB_DIR" ]; then
+            luarocks make rockspecs/compress.zlib-scm-0.rockspec ZLIB_DIR="$ZLIB_DIR"
+        else
+            luarocks make rockspecs/compress.zlib-scm-0.rockspec
+        fi
+        if [ -n "$LZMA_DIR" ]; then
+            luarocks make rockspecs/compress.lzma-scm-0.rockspec LZMA_DIR="$LZMA_DIR"
+        else
+            luarocks make rockspecs/compress.lzma-scm-0.rockspec
+        fi
+        # vcpkg's import library is bz2.lib (the rockspec's library "bz2")
+        if [ -n "$BZIP2_DIR" ]; then
+            luarocks make rockspecs/compress.bzip2-scm-0.rockspec BZIP2_DIR="$BZIP2_DIR"
+        else
+            luarocks make rockspecs/compress.bzip2-scm-0.rockspec
+        fi
+        luarocks make rockspecs/compress-scm-0.rockspec
+
+    - name: test
+      shell: bash
+      env:
+        # the native Windows Perl (Strawberry) to compare with: the Perl of Git
+        # for Windows, first in bash's PATH, is a Cygwin/MSYS build whose zlib
+        # writes the OS byte of a Unix system into gzip headers
+        COMPRESS_TEST_PERL: ${{ runner.os == 'Windows' && 'C:/Strawberry/perl/bin/perl.exe' || '' }}
+        # Perl and compress.zlib must use the same zlib version (see above), else
+        # test04 would silently compare only the decompressed data
+        COMPRESS_TEST_REQUIRE_IDENTICAL: "1"
+        # compress.lzma: Perl (Linux: the distribution's Compress::Raw::Lzma) and xz use
+        # the same liblzma on Linux and macOS (macOS: no Compress::Raw::Lzma, skipped);
+        # on Windows the command line tools are skipped and Strawberry's
+        # Compress::Raw::Lzma, if any, may have another liblzma: data only there
+        LZMA_REQUIRE_IDENTICAL: ${{ runner.os == 'Windows' && '0' || '1' }}
+        # compress.bzip2: libbz2 1.0.8 on Linux and macOS in the library, the bzip2 tool
+        # and Perl's Compress::Raw::Bzip2; on Windows Strawberry's Compress::Raw::Bzip2
+        # bundles its own libbz2 (bytes compared if the version is the same)
+        BZIP2_REQUIRE_IDENTICAL: ${{ runner.os == 'Windows' && '0' || '1' }}
+      run: |
+        set -e
+        [ -n "$COMPRESS_TEST_PERL" ] || unset COMPRESS_TEST_PERL
+        lua -v
+        cd tests/compress
+        lua test01.lua
+        cd ../brotli
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        cd ../zlib
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        lua test05.lua
+        cd ../lzma
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        COMPRESS_TEST_REQUIRE_IDENTICAL="$LZMA_REQUIRE_IDENTICAL" lua test04.lua
+        cd ../bzip2
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        COMPRESS_TEST_REQUIRE_IDENTICAL="$BZIP2_REQUIRE_IDENTICAL" lua test04.lua
+        cd ../../examples
+        lua example01.lua
+        lua brotli01.lua
+        lua zlib01.lua
+        lua lzma01.lua
+        lua bzip2_01.lua
+
+  # Windows with MinGW-w64 (gcc, MSYS2 UCRT64): Lua, LuaRocks and the C
+  # libraries come from MSYS2's packages, so this also checks the rockspecs'
+  # mingw32 overrides (e.g. zlib's import library is libz.dll.a, -lz; liblzma's
+  # liblzma.dll.a, -llzma; libbz2's libbz2.dll.a, -lbz2).
+  test-mingw:
+    strategy:
+      fail-fast: false
+      matrix:
+        luaVersion: ["5.4"]
+
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-pkgconf
+          mingw-w64-ucrt-x86_64-lua
+          mingw-w64-ucrt-x86_64-lua-luarocks
+          mingw-w64-ucrt-x86_64-brotli
+          mingw-w64-ucrt-x86_64-zlib
+          mingw-w64-ucrt-x86_64-xz
+          mingw-w64-ucrt-x86_64-bzip2
+
+    - name: setup
+      run: |
+        set -e
+        lua -v
+        luarocks --version
+        luarocks config
+        luarocks install carray
+        luarocks make tests/compress_multistate-scm-0.rockspec
+        luarocks make tests/compress_testcarray-scm-0.rockspec
+        # each module rock on its own, then the meta rock that depends on all of them
+        luarocks make rockspecs/compress.brotli-scm-0.rockspec BROTLIDEC_DIR=/ucrt64 BROTLIENC_DIR=/ucrt64
+        luarocks make rockspecs/compress.zlib-scm-0.rockspec ZLIB_DIR=/ucrt64
+        luarocks make rockspecs/compress.lzma-scm-0.rockspec LZMA_DIR=/ucrt64
+        luarocks make rockspecs/compress.bzip2-scm-0.rockspec BZIP2_DIR=/ucrt64
+        luarocks make rockspecs/compress-scm-0.rockspec
+
+    - name: test
+      env:
+        # a native Windows Perl (the MSYS one writes a Unix OS byte into gzip
+        # headers); its zlib may be another version than MSYS2's, then test04
+        # compares the decompressed data only
+        COMPRESS_TEST_PERL: C:/Strawberry/perl/bin/perl.exe
+      run: |
+        set -e
+        cd tests/compress
+        lua test01.lua
+        cd ../brotli
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        cd ../zlib
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        lua test05.lua
+        cd ../lzma
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        cd ../bzip2
+        lua test01.lua
+        lua test02.lua
+        lua test03.lua
+        lua test04.lua
+        cd ../../examples
+        lua example01.lua
+        lua brotli01.lua
+        lua zlib01.lua
+        lua lzma01.lua
+        lua bzip2_01.lua
