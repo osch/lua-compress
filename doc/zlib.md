@@ -743,9 +743,9 @@ Windows:
     import library with MSVC, also expected by other rocks such as lua-zlib). Install 
     zlib with vcpkg (*vcpkg install zlib:x64-windows*) and build in a Visual Studio 
     developer prompt with *ZLIB_DIR=\<vcpkg\>/installed/x64-windows*; the DLL from 
-    *\<dir\>/bin* must be on the *PATH*. zlib's own CMake build, which vcpkg uses, may 
-    name the import library *z.lib* instead: then copy *\<dir\>/lib/z.lib* to 
-    *\<dir\>/lib/zlib.lib* (as the CI workflow does).
+    *\<dir\>/bin* must be on the *PATH*. Depending on its version, vcpkg names the import 
+    library *z.lib* or *libz.lib* instead: then copy it to *\<dir\>/lib/zlib.lib* (as the 
+    CI workflow does).
   * **MinGW/MSYS2**: install *mingw-w64-x86_64-zlib*; the rockspec links *libz.dll.a* 
     (library *z*) from */mingw64/lib*. If LuaRocks does not find it, give 
     *ZLIB_INCDIR=/mingw64/include ZLIB_LIBDIR=/mingw64/lib*.

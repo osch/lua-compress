@@ -68,11 +68,19 @@ jobs:
         echo "LZMA_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
         echo "BZIP2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
         echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $GITHUB_PATH
-        # the rockspec links zlib.lib (the usual name of zlib's import library with
-        # MSVC); zlib's own CMake build, which vcpkg uses, may name it z.lib
+        # the rockspec of compress.zlib links zlib.lib; the name of vcpkg's zlib import
+        # library changed across releases (zlib.lib, z.lib, libz.lib)
         lib="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib"
-        if [ ! -f "$lib/zlib.lib" ] && [ -f "$lib/z.lib" ]; then
-            cp "$lib/z.lib" "$lib/zlib.lib"
+        if [ ! -f "$lib/zlib.lib" ]; then
+            if [ -f "$lib/z.lib" ]; then
+                cp "$lib/z.lib" "$lib/zlib.lib"
+            elif [ -f "$lib/libz.lib" ]; then
+                cp "$lib/libz.lib" "$lib/zlib.lib"
+            else
+                echo "no zlib import library (zlib.lib, z.lib, libz.lib) in $lib"
+                ls "$lib"
+                exit 1
+            fi
         fi
         # the rockspec of compress.lzma links lzma.lib, the import library of XZ Utils
         # 5.6.3 and later (liblzma.dll); older versions name it liblzma.lib
@@ -138,8 +146,10 @@ jobs:
         # writes the OS byte of a Unix system into gzip headers
         COMPRESS_TEST_PERL: ${{ runner.os == 'Windows' && 'C:/Strawberry/perl/bin/perl.exe' || '' }}
         # Perl and compress.zlib must use the same zlib version (see above), else
-        # test04 would silently compare only the decompressed data
-        COMPRESS_TEST_REQUIRE_IDENTICAL: "1"
+        # test04 would silently compare only the decompressed data. Not on macOS:
+        # Homebrew's zlib may be newer than the zlib bundled with the runner's
+        # Compress::Raw::Zlib, so only the data can be compared there
+        COMPRESS_TEST_REQUIRE_IDENTICAL: ${{ runner.os != 'macOS' && '1' || '0' }}
         # compress.lzma: Perl (Linux: the distribution's Compress::Raw::Lzma) and xz use
         # the same liblzma on Linux and macOS (macOS: no Compress::Raw::Lzma, skipped);
         # on Windows the command line tools are skipped and Strawberry's
